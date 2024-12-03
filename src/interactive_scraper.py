@@ -4,7 +4,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
@@ -55,85 +55,95 @@ class InteractiveScraper:
         columns_input = input().strip()
         self.columns = [col.strip() for col in columns_input.split(',') if col.strip()]
 
-    def scroll_to_bottom(self):
-        """Automatically scroll to the bottom of the page."""
-        self.logger.info("\n🔄 Scrolling through the page to load all content...")
-        
-        last_height = self.driver.execute_script("return document.body.scrollHeight")
-        while True:
-            # Scroll down
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    def go_to_next_page(self):
+        """Navigate to the next page if available."""
+        try:
+            # First try to find the next button by class
+            next_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[aria-label='Next']") or \
+                          self.driver.find_elements(By.CSS_SELECTOR, ".pagination .next") or \
+                          self.driver.find_elements(By.CSS_SELECTOR, "[rel='next']") or \
+                          self.driver.find_elements(By.XPATH, "//a[contains(text(), 'Next')]") or \
+                          self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Next')]") or \
+                          self.driver.find_elements(By.CSS_SELECTOR, ".next-page")
             
-            # Wait for new content to load
-            time.sleep(2)
-            
-            # Calculate new scroll height
-            new_height = self.driver.execute_script("return document.body.scrollHeight")
-            
-            # Break if no more content loads
-            if new_height == last_height:
-                break
-            last_height = new_height
-            
+            if next_buttons:
+                next_button = next_buttons[0]
+                if next_button.is_displayed() and next_button.is_enabled():
+                    self.driver.execute_script("arguments[0].click();", next_button)
+                    time.sleep(3)  # Wait for page to load
+                    return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Could not navigate to next page: {str(e)}")
+            return False
+
     def extract_product_data(self):
-        """Extract product information from the page."""
-        self.logger.info("\n🔍 Extracting product information...")
+        """Extract product information from all pages."""
+        all_products = []
+        page_num = 1
         
-        # Wait for products to be visible
-        WebDriverWait(self.driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "product-tile"))
-        )
-        
-        products = self.driver.find_elements(By.CLASS_NAME, "product-tile")
-        extracted_data = []
-        
-        for product in products:
+        while True:
+            self.logger.info(f"\n📖 Processing page {page_num}...")
+            
+            # Wait for products to be visible
             try:
-                data = {}
-                # Extract based on common attributes
-                if 'book_name' in self.columns or 'title' in self.columns:
-                    title_element = product.find_element(By.CLASS_NAME, "product-title")
-                    title = title_element.text.strip()
-                    data['book_name'] = title
-                    data['title'] = title
-                
-                if 'author' in self.columns:
-                    try:
-                        author = product.find_element(By.CLASS_NAME, "author").text.strip()
-                        data['author'] = author
-                    except:
-                        data['author'] = 'N/A'
-                
-                if 'price' in self.columns:
-                    try:
-                        price = product.find_element(By.CLASS_NAME, "price").text.strip()
-                        data['price'] = price
-                    except:
-                        data['price'] = 'N/A'
-                
-                if 'published_date' in self.columns:
-                    try:
-                        date = product.find_element(By.CLASS_NAME, "publication-date").text.strip()
-                        data['published_date'] = date
-                    except:
-                        data['published_date'] = 'N/A'
-                
-                # Add any additional requested columns
-                for col in self.columns:
-                    if col not in data:
+                product_elements = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-tile, .product-item, .product-card"))
+                )
+            except:
+                self.logger.warning("No products found on this page")
+                break
+
+            # Extract data from each product
+            for product in product_elements:
+                try:
+                    data = {}
+                    # Title/Book Name
+                    if 'book_name' in self.columns or 'title' in self.columns:
+                        title_element = product.find_element(By.CSS_SELECTOR, ".product-title, h3, .title")
+                        title = title_element.text.strip()
+                        data['book_name'] = title
+                        data['title'] = title
+                    
+                    # Author
+                    if 'author' in self.columns:
                         try:
-                            value = product.find_element(By.CLASS_NAME, col.replace('_', '-')).text.strip()
-                            data[col] = value
+                            author = product.find_element(By.CSS_SELECTOR, ".author, .product-author").text.strip()
+                            data['author'] = author.replace('by ', '')
                         except:
-                            data[col] = 'N/A'
+                            data['author'] = 'N/A'
+                    
+                    # Price
+                    if 'price' in self.columns:
+                        try:
+                            price = product.find_element(By.CSS_SELECTOR, ".price, .product-price").text.strip()
+                            data['price'] = price
+                        except:
+                            data['price'] = 'N/A'
+                    
+                    # Published Date
+                    if 'published_date' in self.columns:
+                        try:
+                            date = product.find_element(By.CSS_SELECTOR, ".publication-date, .release-date").text.strip()
+                            data['published_date'] = date
+                        except:
+                            data['published_date'] = 'N/A'
+                    
+                    all_products.append(data)
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error extracting product data: {str(e)}")
+                    continue
+            
+            # Try to go to next page
+            if not self.go_to_next_page():
+                break
                 
-                extracted_data.append(data)
-                
-            except Exception as e:
-                self.logger.warning(f"Error extracting product data: {str(e)}")
-                continue
+            page_num += 1
+            time.sleep(2)  # Wait between pages
         
-        return extracted_data
+        self.logger.info(f"\n✅ Finished processing {page_num} pages")
+        return all_products
 
     def save_data(self, extracted_data):
         """Save extracted data to CSV and JSON."""
@@ -157,7 +167,7 @@ class InteractiveScraper:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(extracted_data, f, indent=2, ensure_ascii=False)
         
-        self.logger.info(f"\n✅ Data saved successfully! Found {len(extracted_data)} items.")
+        self.logger.info(f"\n✅ Data saved successfully! Found {len(extracted_data)} items")
         self.logger.info(f"📊 CSV file: {csv_path}")
         self.logger.info(f"📋 JSON file: {json_path}")
         
@@ -175,7 +185,6 @@ class InteractiveScraper:
                 self.logger.info("\n❌ No columns specified. Exiting...")
                 return
             
-            self.scroll_to_bottom()
             extracted_data = self.extract_product_data()
             self.save_data(extracted_data)
             
