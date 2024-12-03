@@ -2,6 +2,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
@@ -48,15 +50,10 @@ class InteractiveScraper:
         input("\n✨ Page is loaded! Press Enter when you're ready to select data to extract...")
         
         self.logger.info("\n📝 What information would you like to extract?")
-        self.logger.info("Enter column names one by one (press Enter twice when done):")
+        self.logger.info("Enter column names as comma-separated values:")
         
-        while True:
-            column = input().strip()
-            if not column:
-                if self.columns:
-                    break
-                continue
-            self.columns.append(column)
+        columns_input = input().strip()
+        self.columns = [col.strip() for col in columns_input.split(',') if col.strip()]
 
     def scroll_to_bottom(self):
         """Automatically scroll to the bottom of the page."""
@@ -77,49 +74,73 @@ class InteractiveScraper:
             if new_height == last_height:
                 break
             last_height = new_height
-
-    def extract_page_data(self):
-        """Extract all visible text data from the page."""
-        self.logger.info("\n🔍 Analyzing page content...")
+            
+    def extract_product_data(self):
+        """Extract product information from the page."""
+        self.logger.info("\n🔍 Extracting product information...")
         
-        # Get all elements with visible text
-        elements = self.driver.find_elements(By.XPATH, "//*[not(self::script) and not(self::style)]/text()[normalize-space()]/..")
+        # Wait for products to be visible
+        WebDriverWait(self.driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "product-tile"))
+        )
         
-        # Extract text content
-        text_data = []
-        for element in elements:
+        products = self.driver.find_elements(By.CLASS_NAME, "product-tile")
+        extracted_data = []
+        
+        for product in products:
             try:
-                text = element.text.strip()
-                if text and len(text.split()) <= 20:  # Avoid long paragraphs
-                    text_data.append(text)
-            except:
-                continue
+                data = {}
+                # Extract based on common attributes
+                if 'book_name' in self.columns or 'title' in self.columns:
+                    title_element = product.find_element(By.CLASS_NAME, "product-title")
+                    title = title_element.text.strip()
+                    data['book_name'] = title
+                    data['title'] = title
                 
-        return list(set(text_data))  # Remove duplicates
+                if 'author' in self.columns:
+                    try:
+                        author = product.find_element(By.CLASS_NAME, "author").text.strip()
+                        data['author'] = author
+                    except:
+                        data['author'] = 'N/A'
+                
+                if 'price' in self.columns:
+                    try:
+                        price = product.find_element(By.CLASS_NAME, "price").text.strip()
+                        data['price'] = price
+                    except:
+                        data['price'] = 'N/A'
+                
+                if 'published_date' in self.columns:
+                    try:
+                        date = product.find_element(By.CLASS_NAME, "publication-date").text.strip()
+                        data['published_date'] = date
+                    except:
+                        data['published_date'] = 'N/A'
+                
+                # Add any additional requested columns
+                for col in self.columns:
+                    if col not in data:
+                        try:
+                            value = product.find_element(By.CLASS_NAME, col.replace('_', '-')).text.strip()
+                            data[col] = value
+                        except:
+                            data[col] = 'N/A'
+                
+                extracted_data.append(data)
+                
+            except Exception as e:
+                self.logger.warning(f"Error extracting product data: {str(e)}")
+                continue
+        
+        return extracted_data
 
-    def organize_data(self, text_data):
-        """Organize extracted text into columns based on user input."""
-        self.logger.info("\n🎯 Matching extracted data with your requested columns...")
-        
-        organized_data = {col: [] for col in self.columns}
-        remaining_data = text_data.copy()
-        
-        # Try to match data to columns
-        for col in self.columns:
-            col_lower = col.lower()
-            matched_data = []
-            
-            for text in remaining_data[:]:
-                if any(keyword in text.lower() for keyword in col_lower.split()):
-                    matched_data.append(text)
-                    remaining_data.remove(text)
-            
-            organized_data[col] = matched_data
-        
-        return organized_data
-
-    def save_data(self, organized_data):
+    def save_data(self, extracted_data):
         """Save extracted data to CSV and JSON."""
+        if not extracted_data:
+            self.logger.warning("\n⚠️ No data was extracted!")
+            return
+            
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_filename = f"extracted_data_{timestamp}"
         
@@ -127,18 +148,22 @@ class InteractiveScraper:
         os.makedirs("data", exist_ok=True)
         
         # Save as CSV
-        df = pd.DataFrame(organized_data)
+        df = pd.DataFrame(extracted_data)
         csv_path = f"data/{base_filename}.csv"
         df.to_csv(csv_path, index=False)
         
         # Save as JSON
         json_path = f"data/{base_filename}.json"
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(organized_data, f, indent=2, ensure_ascii=False)
+            json.dump(extracted_data, f, indent=2, ensure_ascii=False)
         
-        self.logger.info(f"\n✅ Data saved successfully!")
+        self.logger.info(f"\n✅ Data saved successfully! Found {len(extracted_data)} items.")
         self.logger.info(f"📊 CSV file: {csv_path}")
         self.logger.info(f"📋 JSON file: {json_path}")
+        
+        # Display sample of extracted data
+        self.logger.info("\n🔎 Sample of extracted data:")
+        print(df.head().to_string())
 
     def scrape(self):
         """Main scraping method."""
@@ -151,14 +176,8 @@ class InteractiveScraper:
                 return
             
             self.scroll_to_bottom()
-            text_data = self.extract_page_data()
-            
-            if not text_data:
-                self.logger.info("\n❌ No data found on the page. Exiting...")
-                return
-            
-            organized_data = self.organize_data(text_data)
-            self.save_data(organized_data)
+            extracted_data = self.extract_product_data()
+            self.save_data(extracted_data)
             
         except Exception as e:
             self.logger.error(f"\n❌ Error: {str(e)}")
